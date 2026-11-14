@@ -41,6 +41,12 @@ final class PlaybackSession: ObservableObject {
     /// 当前这次换集 / 重试的加载：新的加载开始或停止时取消旧的，
     /// 只让最后一次加载起播（load() 在解析返回后检查取消）。
     private var loadTask: Task<Void, Never>?
+    /// 自动恢复独立于一般换集加载：去重、受限次数、取消旧回调。
+    private var recoveryTask: Task<Void, Never>?
+    private var recoveryGeneration = 0
+    private var recoveryAttempts = 0
+    private var recoveryStableFrom: Double?
+    private var stopped = false
 
     init(drama: Drama, episodes: [Episode], startIndex: Int, startPosition: Double, store: Store, controller: PlayerController) {
         self.drama = drama
@@ -65,11 +71,18 @@ final class PlaybackSession: ObservableObject {
     // MARK: - 起播 / 换集
 
     func start() {
+        stopped = false
+        controller.onStall = { [weak self] position in
+            self?.recover(position: position)
+        }
         startLoad()
     }
 
     func retry() {
-        startLoad()
+        // 用户明确重试不受自动恢复预算限制；仍必须释放旧媒体会话。
+        recoveryAttempts = 0
+        recoveryStableFrom = nil
+        recover(position: currentPosition, manual: true)
     }
 
     /// 播放中选集：与详情页点分集一致，从头播放。先存好旧集进度并停掉旧句柄；
@@ -77,6 +90,9 @@ final class PlaybackSession: ObservableObject {
     func playEpisode(at index: Int) {
         guard index != currentIndex, episodes.indices.contains(index) else { return }
         saveProgress()
+        cancelRecovery()
+        recoveryAttempts = 0
+        recoveryStableFrom = nil
         controller.halt()
         if !PlaybackRules.keepsPrefetch(prefetchedIndex: prefetchedIndex, target: index) {
             if let stale = prefetchedPlan {
@@ -93,6 +109,9 @@ final class PlaybackSession: ObservableObject {
 
     /// 离开播放：存好进度、销毁句柄、取消加载与预取，释放核心里的播放会话。
     func stop() {
+        stopped = true
+        controller.onStall = nil
+        cancelRecovery()
         saveProgress()
         controller.stop()
         prefetchTask?.cancel()
@@ -112,6 +131,81 @@ final class PlaybackSession: ObservableObject {
     private func startLoad() {
         loadTask?.cancel()
         loadTask = Task { await load() }
+    }
+
+    /// 对本地代理失效、起播卡住和 mpv 错误统一做有限次数的自愈。
+    /// 重建全新播放会话，而不是反复让 mpv 读取已经释放或过期的 127.0.0.1 地址。
+    private func recover(position: Double, manual: Bool = false) {
+        guard !stopped, recoveryTask == nil, episodes.indices.contains(currentIndex) else { return }
+        guard manual || PlaybackRules.canRecover(attempts: recoveryAttempts) else {
+            error = "自动恢复已尝试 \(PlaybackRules.maxRecoveryAttempts) 次仍无播放进度，请手动重试。"
+            return
+        }
+        if !manual { recoveryAttempts += 1 }
+        recoveryStableFrom = nil
+        let resumePosition = max(0, position.isFinite ? position : currentPosition)
+        let oldPlan = plan
+        let oldPrefetch = prefetchedPlan
+        let index = currentIndex
+        recoveryGeneration += 1
+        let generation = recoveryGeneration
+        loadTask?.cancel()
+        loadTask = nil
+        prefetchTask?.cancel()
+        prefetchTask = nil
+        prefetchedPlan = nil
+        prefetchedIndex = nil
+        plan = nil
+        startPosition = resumePosition
+        controller.halt()
+        error = nil
+        recoveryTask = Task {
+            defer { if recoveryGeneration == generation { recoveryTask = nil } }
+            // 第一次优先尝试站源提供的备用线路；若失败再重新解析当前集。
+            if !manual, let oldPlan, oldPlan.hasAlternative {
+                if let next = try? await CoreClient.shared.fallback(plan: oldPlan) {
+                    if Task.isCancelled || stopped || recoveryGeneration != generation || currentIndex != index {
+                        try? await CoreClient.shared.release(session: next.session)
+                        return
+                    }
+                    if next.session != oldPlan.session {
+                        try? await CoreClient.shared.release(session: oldPlan.session)
+                    }
+                    if let oldPrefetch, oldPrefetch.session != oldPlan.session && oldPrefetch.session != next.session {
+                        try? await CoreClient.shared.release(session: oldPrefetch.session)
+                    }
+                    guard !Task.isCancelled, !stopped, recoveryGeneration == generation, currentIndex == index else { return }
+                    plan = next
+                    controller.play(plan: next, start: resumePosition, danmakuEnabled: danmakuEnabled, speed: playbackSpeed)
+                    return
+                }
+            }
+            if let oldPlan { try? await CoreClient.shared.release(session: oldPlan.session) }
+            if let oldPrefetch, oldPrefetch.session != oldPlan?.session {
+                try? await CoreClient.shared.release(session: oldPrefetch.session)
+            }
+            guard !Task.isCancelled, !stopped, recoveryGeneration == generation, currentIndex == index else { return }
+            do {
+                let next = try await CoreClient.shared.resolve(
+                    drama: drama, episode: episodes[index], quality: preferredQuality
+                )
+                guard !Task.isCancelled, !stopped, recoveryGeneration == generation, currentIndex == index else {
+                    try? await CoreClient.shared.release(session: next.session)
+                    return
+                }
+                plan = next
+                controller.play(plan: next, start: resumePosition, danmakuEnabled: danmakuEnabled, speed: playbackSpeed)
+            } catch {
+                guard !Task.isCancelled, !stopped, recoveryGeneration == generation else { return }
+                self.error = "重新解析播放地址失败：\(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func cancelRecovery() {
+        recoveryGeneration += 1
+        recoveryTask?.cancel()
+        recoveryTask = nil
     }
 
     private func load() async {
@@ -150,6 +244,9 @@ final class PlaybackSession: ObservableObject {
     // MARK: - 播放器事件
 
     func handleEnded() {
+        cancelRecovery()
+        recoveryAttempts = 0
+        recoveryStableFrom = nil
         if autoAdvance, currentIndex + 1 < episodes.count {
             currentIndex += 1
             startPosition = 0
@@ -161,23 +258,25 @@ final class PlaybackSession: ObservableObject {
     }
 
     func handleFailed() async {
-        guard let plan else { return }
-        if plan.hasAlternative {
-            do {
-                let next = try await CoreClient.shared.fallback(plan: plan)
-                self.plan = next
-                controller.play(plan: next, start: 0, danmakuEnabled: danmakuEnabled, speed: playbackSpeed)
-            } catch {
-                self.error = error.localizedDescription
-            }
-        } else {
-            let detail = controller.lastError.isEmpty ? controller.debugInfo : controller.lastError
-            self.error = detail.isEmpty ? "播放失败，请返回重试" : "播放失败，请返回重试（\(detail)）"
-        }
+        // 原实现只在有备用线路时切换，单线路失败就直接终止，无法自愈。
+        guard plan != nil, !stopped else { return }
+        recover(position: currentPosition)
     }
 
     func handleProgress(position: Double, duration: Double) {
         guard position > 0, duration > 0 else { return }
+        // 成功连续推进 30 秒才重置恢复预算；不能让频繁起播失败无限重试。
+        if recoveryAttempts > 0 {
+            if let stableFrom = recoveryStableFrom {
+                if position < stableFrom { recoveryStableFrom = position }
+                else if position - stableFrom >= 30 {
+                    recoveryAttempts = 0
+                    recoveryStableFrom = nil
+                }
+            } else {
+                recoveryStableFrom = position
+            }
+        }
         maybePrefetchNext(position: position, duration: duration)
         // 与 Dart 侧一致：约每 5 秒落一次进度，避免频繁写盘。
         guard PlaybackRules.shouldSaveProgress(position: position, lastSaved: lastSavedPosition) else { return }
