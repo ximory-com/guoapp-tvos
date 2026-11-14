@@ -257,8 +257,9 @@ private struct PlayerScreen: View {
                             dismiss()
                         }
                     }
-                    // 诊断必须在最终错误页可见，否则恢复重试结束后所有证据都被覆盖。
-                    if diagnosticsEnabled {
+                    // 本版是诊断构建：失败时无条件显示错误轨迹，不能依赖用户此前是否开启诊断。
+                    // 旧版在后台恢复后会直接跳错误页，导致隐含设置的调试面板永远不可见。
+                    {
                         Text("恢复轨迹（重启后仍保留）:\n" + session.recoveryStatus
                              + "\nGo 媒体代理日志:\n" + PlayerController.latestNativeStreamDiagnostics()
                              + "\n播放器: " + controller.lastError)
