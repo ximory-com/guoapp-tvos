@@ -257,6 +257,20 @@ private struct PlayerScreen: View {
                             dismiss()
                         }
                     }
+                    // 诊断必须在最终错误页可见，否则恢复重试结束后所有证据都被覆盖。
+                    if diagnosticsEnabled {
+                        Text("恢复轨迹（重启后仍保留）:\n" + session.recoveryStatus
+                             + "\nGo 媒体代理日志:\n" + PlayerController.latestNativeStreamDiagnostics()
+                             + "\n播放器: " + controller.lastError)
+                            .font(.system(size: TVTheme.TextSize.caption2))
+                            .foregroundColor(.white)
+                            .multilineTextAlignment(.leading)
+                            .lineLimit(12)
+                            .frame(maxWidth: 1000, alignment: .leading)
+                            .padding(16)
+                            .background(Color.black.opacity(0.8))
+                            .cornerRadius(10)
+                    }
                 }
                 .padding(60)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
