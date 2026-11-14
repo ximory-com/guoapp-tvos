@@ -495,7 +495,8 @@ final class PlayerController: NSObject, ObservableObject {
         lines.append("进度: \(Int(position)) / \(Int(duration)) 秒")
         lines.append("解密: \(hasDecryptionKey ? "有" : "无")")
         if let url = currentURL {
-            lines.append("地址: \(url.host ?? "-")\(url.path)")
+            // 不把本地代理会话 token 或上游签名路径显示在电视/截图里。
+            lines.append("地址: \(url.host ?? "-")，格式=\(url.pathExtension)")
         }
         if !lastError.isEmpty {
             lines.append("错误: \(lastError)")
