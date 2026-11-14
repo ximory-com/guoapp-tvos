@@ -478,6 +478,8 @@ final class PlayerController: NSObject, ObservableObject {
 
     /// 切后台时暂停并停掉视频输出；切回前台时恢复输出并续播（防回前台黑屏）。
     private func enterBackground() {
+        // tvOS 后台可能冻结计时器，不能把后台耗时算作播放停滞。
+        playbackWatchdog.reset()
         guard let handle = mpv else { return }
         wasPlayingBeforeBackground = !getFlag("pause")
         setFlag("pause", true)
@@ -486,6 +488,7 @@ final class PlayerController: NSObject, ObservableObject {
     }
 
     private func enterForeground() {
+        playbackWatchdog.reset()
         guard let handle = mpv else { return }
         _ = mpv_set_option_string(handle, "vid", "auto")
         if wasPlayingBeforeBackground {
