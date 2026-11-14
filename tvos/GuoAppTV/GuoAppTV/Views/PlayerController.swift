@@ -120,10 +120,17 @@ final class PlayerController: NSObject, ObservableObject {
             let message = event["message"] as? String ?? ""
             let category = message.components(separatedBy: "error=").dropFirst().first?
                 .split(separator: " ").first.map(String.init) ?? "-"
-            entries.append("\(timestamp) \(kind) HTTP \(status) \(host) error=\(category)")
+            // Go 只在非主动 release 时记录 session_cancel:
+            // reason=idle_expired / capacity_eviction 等是定位后台失效的关键证据。
+            let reason = message.components(separatedBy: "reason=").dropFirst().first?
+                .split(separator: " ").first.map(String.init) ?? "-"
+            let sessionHash = message.components(separatedBy: "session=").dropFirst().first?
+                .split(separator: " ").first.map(String.init) ?? "-"
+            let code = status == 0 ? "" : " HTTP \(status)"
+            entries.append("\(timestamp) \(kind)\(code) sid=\(sessionHash.prefix(12)) reason=\(reason) error=\(category) host=\(host)")
         }
-        return entries.suffix(3).joined(separator: "\n").isEmpty
-            ? "无媒体代理异常" : entries.suffix(3).joined(separator: "\n")
+        return entries.suffix(5).joined(separator: "\n").isEmpty
+            ? "无媒体代理异常" : entries.suffix(5).joined(separator: "\n")
     }
     private var backgroundObservers: [NSObjectProtocol] = []
     private var backgroundObserversInstalled = false
