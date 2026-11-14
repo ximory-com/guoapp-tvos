@@ -174,9 +174,11 @@ final class PlaybackSession: ObservableObject {
                     if let oldPrefetch, oldPrefetch.session != oldPlan.session && oldPrefetch.session != next.session {
                         try? await CoreClient.shared.release(session: oldPrefetch.session)
                     }
-                    guard !Task.isCancelled, !stopped, recoveryGeneration == generation, currentIndex == index else { return }
-                    plan = next
-                    controller.play(plan: next, start: resumePosition, danmakuEnabled: danmakuEnabled, speed: playbackSpeed)
+                    guard !Task.isCancelled, !stopped, recoveryGeneration == generation, currentIndex == index else {
+                        try? await CoreClient.shared.release(session: next.session)
+                        return
+                    }
+                    activate(next, start: resumePosition)
                     return
                 }
             }
@@ -193,8 +195,7 @@ final class PlaybackSession: ObservableObject {
                     try? await CoreClient.shared.release(session: next.session)
                     return
                 }
-                plan = next
-                controller.play(plan: next, start: resumePosition, danmakuEnabled: danmakuEnabled, speed: playbackSpeed)
+                activate(next, start: resumePosition)
             } catch {
                 guard !Task.isCancelled, !stopped, recoveryGeneration == generation else { return }
                 self.error = "重新解析播放地址失败：\(error.localizedDescription)"
@@ -208,35 +209,49 @@ final class PlaybackSession: ObservableObject {
         recoveryTask = nil
     }
 
+    /// 覆盖旧计划之后才释放旧会话，避免切集时代理不断累积直至达到容量上限。
+    private func activate(_ next: PlaybackPlan, start: Double) {
+        let previous = plan
+        plan = next
+        controller.play(plan: next, start: start, danmakuEnabled: danmakuEnabled, speed: playbackSpeed)
+        if let previous, previous.session != next.session {
+            Task { try? await CoreClient.shared.release(session: previous.session) }
+        }
+    }
+
     private func load() async {
-        guard currentIndex < episodes.count else {
-            onReachedEnd?()
+        guard !stopped, currentIndex < episodes.count else {
+            if !stopped { onReachedEnd?() }
             return
         }
         error = nil
         let episode = episodes[currentIndex]
-        // 优先用预取好的计划（上一集还剩 10 秒时已后台解析好），
-        // 切集时免去再等解析地址，是衔接卡顿的主因之一。
+        // 预取仅在索引、任务状态有效时才可复用，切集旧计划适时释放。
         if prefetchedIndex == currentIndex {
             let cached = prefetchedPlan
             prefetchedPlan = nil
             prefetchedIndex = nil
             if let cached {
-                plan = cached
-                controller.play(plan: cached, start: startPosition, danmakuEnabled: danmakuEnabled, speed: playbackSpeed)
+                if Task.isCancelled || stopped {
+                    try? await CoreClient.shared.release(session: cached.session)
+                    return
+                }
+                activate(cached, start: startPosition)
                 return
             }
-            // 预取失败过：直接走正常解析（不重试预取）。
         }
         do {
             let resolved = try await CoreClient.shared.resolve(
                 drama: drama, episode: episode, quality: preferredQuality
             )
-            guard !Task.isCancelled else { return }
-            plan = resolved
-            controller.play(plan: resolved, start: startPosition, danmakuEnabled: danmakuEnabled, speed: playbackSpeed)
+            guard !Task.isCancelled, !stopped else {
+                // 过时的 resolve 结果不能留在 Go 核心里成为孤儿会话。
+                try? await CoreClient.shared.release(session: resolved.session)
+                return
+            }
+            activate(resolved, start: startPosition)
         } catch {
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, !stopped else { return }
             self.error = error.localizedDescription
         }
     }
