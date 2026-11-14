@@ -12,6 +12,12 @@ enum PlaybackRules {
         attempts >= 0 && attempts < maxRecoveryAttempts
     }
 
+    /// 第一轮用站源备用线路；如果备用 mpv 仍起播失败，第二轮必须重新解析，
+    /// 不能三次都沿用同一批旧签名/凭证。
+    static func shouldTryFallback(attempt: Int, manual: Bool, hasAlternative: Bool) -> Bool {
+        !manual && hasAlternative && attempt == 1
+    }
+
     /// 距本集结束还剩多少秒时开始预取下一集。
     static let prefetchLeadSeconds = 10.0
     /// 进度落盘间隔（秒），与 Dart 侧一致。
