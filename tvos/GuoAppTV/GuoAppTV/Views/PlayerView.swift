@@ -267,7 +267,7 @@ private struct PlayerScreen: View {
             // 解析阶段旧播放器已被销毁，仍要保留最后几个阶段记录，
             // 否则诊断浮层会随 plan=nil 一起消失，无法判断是否卡在 Go 请求。
             if diagnosticsEnabled && session.plan == nil && session.error == nil {
-                Text("恢复轨迹（重启后仍保留）:\n" + session.recoveryStatus)
+                Text("恢复轨迹（重启后仍保留）:\n" + session.recoveryStatus + "\nGo媒体日志:\n" + PlayerController.latestNativeStreamDiagnostics())
                     .font(.system(size: TVTheme.TextSize.caption2))
                     .foregroundColor(.white)
                     .multilineTextAlignment(.leading)
