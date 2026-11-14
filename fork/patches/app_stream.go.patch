@@ -1,0 +1,52 @@
+diff --git a/native/core/app_stream.go b/native/core/app_stream.go
+--- a/native/core/app_stream.go
++++ b/native/core/app_stream.go
+@@ -81,6 +81,35 @@
+ 	stream.server = server
+ 	go func() { _ = server.Serve(listener) }()
+ 	return stream, nil
++}
++
++// nativeHealthy performs a bounded, proxy-free loopback probe. A Go server object
++// may survive tvOS background suspension after its listening socket no longer does.
++func (stream *nativeStreamServer) nativeHealthy() bool {
++    if stream == nil || stream.server == nil { return false }
++    request, err := http.NewRequest(http.MethodHead, stream.address+"/__guoapp_health", nil)
++    if err != nil { return false }
++    client := &http.Client{
++        Timeout: 750 * time.Millisecond,
++        Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true},
++    }
++    response, err := client.Do(request)
++    if err != nil { return false }
++    defer response.Body.Close()
++    return response.StatusCode == http.StatusNoContent
++}
++
++// nativeShutdown invalidates all addresses from the old listener. New playback
++// plans must use the replacement server's port, not stale loopback URLs.
++func (stream *nativeStreamServer) nativeShutdown(reason string) {
++    if stream == nil { return }
++    stream.mu.Lock()
++    for id, session := range stream.sessions {
++        stream.nativeCancel(session, reason)
++        delete(stream.sessions, id)
++    }
++    stream.mu.Unlock()
++    if stream.server != nil { _ = stream.server.Close() }
+ }
+ 
+ func (stream *nativeStreamServer) nativeOpen(media providerMedia) (string, string) {
+@@ -248,6 +277,12 @@
+ }
+ 
+ func (stream *nativeStreamServer) nativeServe(writer http.ResponseWriter, request *http.Request) {
++    // A local-only liveness endpoint, independent of upstream video/CDN status.
++    if request.URL.Path == "/__guoapp_health" && request.Method == http.MethodHead {
++        writer.WriteHeader(http.StatusNoContent)
++        return
++    }
++
+ 	if request.Method != http.MethodGet && request.Method != http.MethodHead {
+ 		writer.WriteHeader(http.StatusMethodNotAllowed)
+ 		return
