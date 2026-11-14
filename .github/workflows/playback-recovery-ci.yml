@@ -1,0 +1,52 @@
+name: Playback Recovery Test Build
+
+# Private validation workflow for the fork; NEVER publishes GitHub Releases.
+on:
+  push:
+    branches:
+      - fix/playback-stall-recovery
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: playback-recovery-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  logic-tests:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Swift playback and logic tests
+        run: swift test --package-path tvos
+
+  tvos-unsigned:
+    needs: logic-tests
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: upstream/native/go.mod
+          cache-dependency-path: upstream/native/go.sum
+      - name: Validate tvOS Xcode SDK
+        run: |
+          xcodebuild -version
+          xcrun --sdk appletvos --show-sdk-path
+      - name: Build unsigned experimental hongguojian IPA
+        run: python scripts/build_tvos.py
+      - uses: actions/upload-artifact@v7
+        with:
+          name: hongguojian-playback-recovery-unsigned
+          path: dist/tvos/*-tvos-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14
