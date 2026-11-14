@@ -3,6 +3,15 @@ import Foundation
 /// 播放页的纯规则（预取下一集、进度落盘节流、换集时预取是否还能用），
 /// 由 PlaybackSession 调用；抽出来是为了在 Mac 上单测。
 enum PlaybackRules {
+    /// 前台播放无进度多久视为卡顿（含一直停在 0 秒的起播失败）。
+    static let stallTimeoutSeconds: TimeInterval = 20
+    /// 同一轮连续故障最多恢复三次，避免无限换线 / 解析请求。
+    static let maxRecoveryAttempts = 3
+
+    static func canRecover(attempts: Int) -> Bool {
+        attempts >= 0 && attempts < maxRecoveryAttempts
+    }
+
     /// 距本集结束还剩多少秒时开始预取下一集。
     static let prefetchLeadSeconds = 10.0
     /// 进度落盘间隔（秒），与 Dart 侧一致。
@@ -39,5 +48,40 @@ enum PlaybackRules {
     /// 换到 target 集时，预取若是为它或它的下一集准备的就留着，否则释放。
     static func keepsPrefetch(prefetchedIndex: Int?, target: Int) -> Bool {
         prefetchedIndex == target || prefetchedIndex == target + 1
+    }
+}
+
+
+/// 独立于 mpv 的纯状态机；后台 / 暂停期间不累计卡顿时间。
+/// 只记录进度与时间，不持有播放器或网络资源，便于 Swift 单元测试。
+struct PlaybackWatchdog {
+    private var lastPosition: Double?
+    private var lastAdvanceAt: Date?
+
+    mutating func reset() {
+        lastPosition = nil
+        lastAdvanceAt = nil
+    }
+
+    mutating func observe(position: Double, paused: Bool, foreground: Bool, now: Date) -> Bool {
+        guard foreground, !paused, position.isFinite, position >= 0 else {
+            reset()
+            return false
+        }
+        guard let previous = lastPosition, let since = lastAdvanceAt else {
+            lastPosition = position
+            lastAdvanceAt = now
+            return false
+        }
+        // 正常推进及拖动跳转都视为进度变化；避免因快退触发假卡顿。
+        if abs(position - previous) > 0.15 || now < since {
+            lastPosition = position
+            lastAdvanceAt = now
+            return false
+        }
+        guard now.timeIntervalSince(since) >= PlaybackRules.stallTimeoutSeconds else { return false }
+        // 防抖：回调触发之后也至少隔一个完整超时周期才能再次触发。
+        lastAdvanceAt = now
+        return true
     }
 }
