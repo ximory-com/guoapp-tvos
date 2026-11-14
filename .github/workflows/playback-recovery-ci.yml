@@ -42,15 +42,7 @@ jobs:
         run: |
           python scripts/apply_fork_overlay.py
           cd upstream/native
-          go test ./core -run '^TestNativeStreamRecoverDeadListener      - name: Build unsigned experimental hongguojian IPA
-        run: python scripts/build_tvos.py
-      - uses: actions/upload-artifact@v7
-        with:
-          name: hongguojian-playback-recovery-unsigned
-          path: dist/tvos/*-tvos-unsigned.ipa
-          if-no-files-found: error
-          retention-days: 14
- -count=1 -timeout=90s
+          go test ./core -run 'TestNativeStreamRecoverDeadListener' -count=1 -timeout=90s
       - name: Validate tvOS Xcode SDK
         run: |
           xcodebuild -version
