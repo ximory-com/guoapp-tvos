@@ -80,6 +80,9 @@ final class PlayerController: NSObject, ObservableObject {
     private(set) var lastError = ""
     private var activePlan: PlaybackPlan?
     private var activeDanmakuEnabled = true
+    /// 在重建 Metal 层时保存本次起播位置与倍速（此前会错误地从 0 秒、1x 重来）。
+    private var activeStartPosition = 0.0
+    private var activeSpeed = 1.0
     private var pendingPlay: (plan: PlaybackPlan, start: Double, danmakuEnabled: Bool, speed: Double)?
     private let overlay = DanmakuOverlayView()
     private let danmaku = DanmakuEngine()
@@ -114,7 +117,8 @@ final class PlayerController: NSObject, ObservableObject {
         installBackgroundObservers()
         if layerChanged, let activePlan {
             // 视图重建导致 Metal 层换了：mpv 需重建并指向新层，从当前位置续播。
-            startPlayback(plan: activePlan, start: progress.position, danmakuEnabled: activeDanmakuEnabled)
+            let resume = progress.position > 0 ? progress.position : activeStartPosition
+            startPlayback(plan: activePlan, start: resume, danmakuEnabled: activeDanmakuEnabled, speed: activeSpeed)
             return
         }
         if let pending = pendingPlay {
@@ -138,6 +142,7 @@ final class PlayerController: NSObject, ObservableObject {
         destroyMpv()
         pendingPlay = nil
         activePlan = nil
+        activeStartPosition = 0
         danmaku.reset()
         overlay.clear()
         for observer in backgroundObservers {
@@ -188,6 +193,7 @@ final class PlayerController: NSObject, ObservableObject {
     func halt() {
         destroyMpv()
         activePlan = nil
+        activeStartPosition = 0
         pendingPlay = nil
         progress = PlaybackProgress(position: 0, duration: 0)
         isPaused = false
@@ -245,6 +251,8 @@ final class PlayerController: NSObject, ObservableObject {
         lastError = ""
         activePlan = plan
         activeDanmakuEnabled = danmakuEnabled
+        activeStartPosition = start
+        activeSpeed = speed
         progress = PlaybackProgress(position: 0, duration: 0)
         videoSize = nil
         debugInfo = "正在加载…"
@@ -403,6 +411,7 @@ final class PlayerController: NSObject, ObservableObject {
             let size = CGSize(width: Double(width), height: Double(height))
             if size != videoSize { videoSize = size }
         }
+        if position.isFinite && position > 0 { activeStartPosition = position }
         progress = PlaybackProgress(
             position: position.isFinite ? position : 0,
             duration: duration.isFinite ? duration : 0
