@@ -54,8 +54,41 @@ final class PlaybackSession: ObservableObject {
         entries.append("\(stamp) \(event)")
         entries = Array(entries.suffix(8))
         UserDefaults.standard.set(entries, forKey: "playbackRecoveryHistory")
-        recoveryStatus = entries.suffix(3).joined(separator: "\n")
+        recoveryStatus = entries.suffix(6).joined(separator: "\n")
         UserDefaults.standard.set(recoveryStatus, forKey: "playbackRecoveryTrace")
+    }
+    /// 仅在失败现场探测本地 Go 代理的 HEAD，不传输媒体正文或记录会话 URL。
+    private func probeFailedMediaProxy(_ failed: PlaybackPlan?) {
+        guard let failed, let url = URL(string: failed.url) else {
+            traceRecovery("代理探测：无有效计划")
+            return
+        }
+        let route = "\(failed.routeIndex + 1)/\(failed.routeCount)"
+        if failed.expiresAt > 0 {
+            let remaining = failed.expiresAt / 1_000 - Int(Date().timeIntervalSince1970)
+            traceRecovery("失败线路 #\(route)，凭证剩余 \(remaining)s")
+        } else {
+            traceRecovery("失败线路 #\(route)，无凭证到期字段")
+        }
+        guard url.host == "127.0.0.1", url.scheme == "http" else {
+            traceRecovery("代理探测：非本地 HTTP 地址")
+            return
+        }
+        Task { [weak self] in
+            var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 8)
+            request.httpMethod = "HEAD"
+            do {
+                let (_, response) = try await URLSession.shared.data(for: request)
+                guard let http = response as? HTTPURLResponse else {
+                    self?.traceRecovery("代理 HEAD: 非 HTTP 响应")
+                    return
+                }
+                self?.traceRecovery("代理 HEAD: HTTP \(http.statusCode), route #\(route)")
+            } catch {
+                let ns = error as NSError
+                self?.traceRecovery("代理 HEAD 错误：\(ns.domain) #\(ns.code), route #\(route)")
+            }
+        }
     }
     private var recoveryStableFrom: Double?
     private var stopped = false
@@ -150,7 +183,8 @@ final class PlaybackSession: ObservableObject {
     private func recover(position: Double, manual: Bool = false) {
         guard !stopped, recoveryTask == nil, episodes.indices.contains(currentIndex) else { return }
         guard manual || PlaybackRules.canRecover(attempts: recoveryAttempts) else {
-            traceRecovery("自动恢复预算耗尽")
+            traceRecovery("自动恢复预算耗尽（\(recoveryAttempts) 次）")
+            probeFailedMediaProxy(plan)
             error = "自动恢复已尝试 \(PlaybackRules.maxRecoveryAttempts) 次仍无播放进度，请手动重试。"
             return
         }
