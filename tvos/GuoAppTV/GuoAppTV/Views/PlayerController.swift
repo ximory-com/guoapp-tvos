@@ -85,6 +85,9 @@ final class PlayerController: NSObject, ObservableObject {
     private let danmaku = DanmakuEngine()
     private var overlayAttached = false
     private var progressTimer: Timer?
+    /// 播放无进度时交给会话层重建媒体代理和地址，控制器不直接做网络重试。
+    var onStall: ((Double) -> Void)?
+    private var playbackWatchdog = PlaybackWatchdog()
     private var backgroundObservers: [NSObjectProtocol] = []
     private var backgroundObserversInstalled = false
     private var wasPlayingBeforeBackground = false
@@ -225,6 +228,7 @@ final class PlayerController: NSObject, ObservableObject {
 
     private func startPlayback(plan: PlaybackPlan, start: Double, danmakuEnabled: Bool, speed: Double = 1.0) {
         destroyMpv()
+        playbackWatchdog.reset()
         danmaku.configure(plan: plan, enabled: danmakuEnabled)
         guard let url = URL(string: plan.url) else {
             debugInfo = "播放地址无效"
@@ -320,6 +324,7 @@ final class PlayerController: NSObject, ObservableObject {
     }
 
     private func destroyMpv() {
+        playbackWatchdog.reset()
         progressTimer?.invalidate()
         progressTimer = nil
         // 播放器销毁时恢复系统空闲计时器，屏保才能正常出现。
@@ -397,6 +402,17 @@ final class PlayerController: NSObject, ObservableObject {
             durationMs: (duration.isFinite && duration > 0) ? Int(duration * 1000) : 0
         )
         updateDebugInfo(position: position, duration: duration)
+        // 仅在前台且未主动暂停时观察；0/0 一直不动也能自恢复。
+        // 在回调前更新计时戳，避免异步重载阶段反复触发。
+        if playbackWatchdog.observe(
+            position: position,
+            paused: paused || startsPaused,
+            foreground: UIApplication.shared.applicationState == .active,
+            now: Date()
+        ) {
+            lastError = "playback stalled: no progress for 20s"
+            onStall?(max(0, position))
+        }
     }
 
     /// 每秒刷新诊断面板：状态、编码、硬解、解密、播放地址。
