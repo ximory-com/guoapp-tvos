@@ -107,4 +107,12 @@ struct PlaybackRulesTests {
         #expect(!PlaybackRules.canRecover(attempts: 3))
         #expect(!PlaybackRules.canRecover(attempts: -1))
     }
+
+    @Test func fallbackIsUsedOnlyOnFirstAutomaticRecovery() {
+        #expect(PlaybackRules.shouldTryFallback(attempt: 1, manual: false, hasAlternative: true))
+        #expect(!PlaybackRules.shouldTryFallback(attempt: 2, manual: false, hasAlternative: true))
+        #expect(!PlaybackRules.shouldTryFallback(attempt: 3, manual: false, hasAlternative: true))
+        #expect(!PlaybackRules.shouldTryFallback(attempt: 1, manual: true, hasAlternative: true))
+        #expect(!PlaybackRules.shouldTryFallback(attempt: 1, manual: false, hasAlternative: false))
+    }
 }
