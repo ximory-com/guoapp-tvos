@@ -93,6 +93,38 @@ final class PlayerController: NSObject, ObservableObject {
     private var playbackWatchdog = PlaybackWatchdog()
     /// 用户主动暂停意图，不能使用 mpv 内部 pause（故障时播放器可能自行暂停）替代。
     private var userPaused = false
+    private var lastNativeDiagnosticRefresh = Date.distantPast
+    private var recentNativeDiagnostics = ""
+
+    /// Go 核心已经把媒体代理故障写到 Caches/logs/app.log。
+    /// 仅诊断面板需要时读取末尾 64 KiB，不暴露 URL、token 或完整请求路径。
+    static func latestNativeStreamDiagnostics() -> String {
+        let cache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        let url = cache.appendingPathComponent("logs/app.log")
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return "无媒体代理日志" }
+        defer { try? handle.close() }
+        let end = (try? handle.seekToEnd()) ?? 0
+        try? handle.seek(toOffset: end > 65_536 ? end - 65_536 : 0)
+        guard let bytes = try? handle.readToEnd() else { return "读取代理日志失败" }
+        let text = String(decoding: bytes, as: UTF8.self)
+        var entries: [String] = []
+        for line in text.split(separator: "\n").suffix(180) {
+            guard let data = line.data(using: .utf8),
+                let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                let kind = event["event"] as? String, kind.hasPrefix("stream.")
+            else { continue }
+            let timestamp = String((event["time"] as? String ?? "").suffix(14))
+            let status = event["httpStatus"] as? Int ?? 0
+            let host = (event["host"] as? String ?? "").prefix(42)
+            let message = event["message"] as? String ?? ""
+            let category = message.components(separatedBy: "error=").dropFirst().first?
+                .split(separator: " ").first.map(String.init) ?? "-"
+            entries.append("\(timestamp) \(kind) HTTP \(status) \(host) error=\(category)")
+        }
+        return entries.suffix(3).joined(separator: "\n").isEmpty
+            ? "无媒体代理异常" : entries.suffix(3).joined(separator: "\n")
+    }
     private var backgroundObservers: [NSObjectProtocol] = []
     private var backgroundObserversInstalled = false
     private var wasPlayingBeforeBackground = false
@@ -453,6 +485,11 @@ final class PlayerController: NSObject, ObservableObject {
         let buffering = getFlag("paused-for-cache")
         let state = paused ? "已暂停" : (buffering ? "缓冲中" : "播放中")
         lines.append("状态: \(state)；用户暂停=\(userPaused)，引擎暂停=\(paused)，缓冲=\(buffering)")
+        if Date().timeIntervalSince(lastNativeDiagnosticRefresh) >= 5 {
+            lastNativeDiagnosticRefresh = Date()
+            recentNativeDiagnostics = Self.latestNativeStreamDiagnostics()
+        }
+        lines.append("媒体代理: \(recentNativeDiagnostics)")
         lines.append("视频: \(getString("video-codec").orDash) 硬解: \(getString("hwdec-current").orDash)")
         lines.append("音频: \(getString("audio-codec").orDash)")
         lines.append("进度: \(Int(position)) / \(Int(duration)) 秒")
