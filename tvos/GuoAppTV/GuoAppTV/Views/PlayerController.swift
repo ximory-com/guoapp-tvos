@@ -91,6 +91,8 @@ final class PlayerController: NSObject, ObservableObject {
     /// 播放无进度时交给会话层重建媒体代理和地址，控制器不直接做网络重试。
     var onStall: ((Double) -> Void)?
     private var playbackWatchdog = PlaybackWatchdog()
+    /// 用户主动暂停意图，不能使用 mpv 内部 pause（故障时播放器可能自行暂停）替代。
+    private var userPaused = false
     private var backgroundObservers: [NSObjectProtocol] = []
     private var backgroundObserversInstalled = false
     private var wasPlayingBeforeBackground = false
@@ -139,6 +141,7 @@ final class PlayerController: NSObject, ObservableObject {
 
     func stop() {
         stopped = true
+        userPaused = false
         destroyMpv()
         pendingPlay = nil
         activePlan = nil
@@ -154,7 +157,9 @@ final class PlayerController: NSObject, ObservableObject {
 
     func togglePause() {
         guard mpv != nil else { return }
-        setFlag("pause", !getFlag("pause"))
+        let next = !getFlag("pause")
+        setFlag("pause", next)
+        userPaused = next
         isPaused = getFlag("pause")
         updateIdleTimer()
     }
@@ -169,6 +174,7 @@ final class PlayerController: NSObject, ObservableObject {
     }
 
     private func setPaused(_ paused: Bool) {
+        userPaused = paused
         guard mpv != nil else { return }
         setFlag("pause", paused)
         isPaused = getFlag("pause")
@@ -191,6 +197,7 @@ final class PlayerController: NSObject, ObservableObject {
     /// 手动选集时先停掉当前句柄：旧集不再上报进度（否则会记到新集名下），
     /// 新集地址解析好后照常 play()。不动后台观察者与弹幕浮层。
     func halt() {
+        userPaused = false
         destroyMpv()
         activePlan = nil
         activeStartPosition = 0
@@ -253,6 +260,7 @@ final class PlayerController: NSObject, ObservableObject {
         activeDanmakuEnabled = danmakuEnabled
         activeStartPosition = start
         activeSpeed = speed
+        userPaused = startsPaused
         progress = PlaybackProgress(position: 0, duration: 0)
         videoSize = nil
         debugInfo = "正在加载…"
@@ -425,7 +433,7 @@ final class PlayerController: NSObject, ObservableObject {
         // 在回调前更新计时戳，避免异步重载阶段反复触发。
         if playbackWatchdog.observe(
             position: position,
-            paused: paused || startsPaused,
+            paused: userPaused || startsPaused,
             foreground: UIApplication.shared.applicationState == .active,
             now: Date()
         ) {
@@ -444,7 +452,7 @@ final class PlayerController: NSObject, ObservableObject {
         let paused = getFlag("pause")
         let buffering = getFlag("paused-for-cache")
         let state = paused ? "已暂停" : (buffering ? "缓冲中" : "播放中")
-        lines.append("状态: \(state)")
+        lines.append("状态: \(state)；用户暂停=\(userPaused)，引擎暂停=\(paused)，缓冲=\(buffering)")
         lines.append("视频: \(getString("video-codec").orDash) 硬解: \(getString("hwdec-current").orDash)")
         lines.append("音频: \(getString("audio-codec").orDash)")
         lines.append("进度: \(Int(position)) / \(Int(duration)) 秒")
