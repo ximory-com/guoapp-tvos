@@ -53,4 +53,42 @@ struct PlaybackRulesTests {
         #expect(!PlaybackRules.disablesIdleTimer(hasPlayer: false, paused: false, keepsScreenAwake: true))
         #expect(!PlaybackRules.disablesIdleTimer(hasPlayer: true, paused: false, keepsScreenAwake: false))
     }
+
+    @Test func stallDetectedAtTwentySecondsIncludingZeroPosition() {
+        var watchdog = PlaybackWatchdog()
+        let start = Date(timeIntervalSince1970: 100)
+        #expect(!watchdog.observe(position: 0, paused: false, foreground: true, now: start))
+        #expect(!watchdog.observe(position: 0, paused: false, foreground: true, now: start.addingTimeInterval(19)))
+        #expect(watchdog.observe(position: 0, paused: false, foreground: true, now: start.addingTimeInterval(20)))
+        #expect(!watchdog.observe(position: 0, paused: false, foreground: true, now: start.addingTimeInterval(21)))
+    }
+
+    @Test func pausingAndBackgroundingSuspendStallCounter() {
+        var watchdog = PlaybackWatchdog()
+        let start = Date(timeIntervalSince1970: 100)
+        #expect(!watchdog.observe(position: 12, paused: false, foreground: true, now: start))
+        #expect(!watchdog.observe(position: 12, paused: true, foreground: true, now: start.addingTimeInterval(22)))
+        #expect(!watchdog.observe(position: 12, paused: false, foreground: true, now: start.addingTimeInterval(23)))
+        #expect(!watchdog.observe(position: 12, paused: false, foreground: false, now: start.addingTimeInterval(47)))
+        #expect(!watchdog.observe(position: 12, paused: false, foreground: true, now: start.addingTimeInterval(48)))
+        #expect(watchdog.observe(position: 12, paused: false, foreground: true, now: start.addingTimeInterval(68)))
+    }
+
+    @Test func playbackProgressAndSeekResetTheWatchdog() {
+        var watchdog = PlaybackWatchdog()
+        let t = Date(timeIntervalSince1970: 1_000)
+        #expect(!watchdog.observe(position: 5, paused: false, foreground: true, now: t))
+        #expect(!watchdog.observe(position: 10, paused: false, foreground: true, now: t.addingTimeInterval(19)))
+        #expect(!watchdog.observe(position: 3, paused: false, foreground: true, now: t.addingTimeInterval(30)))
+        #expect(!watchdog.observe(position: 3, paused: false, foreground: true, now: t.addingTimeInterval(49)))
+        #expect(watchdog.observe(position: 3, paused: false, foreground: true, now: t.addingTimeInterval(50)))
+    }
+
+    @Test func recoveryBudgetIsBounded() {
+        #expect(PlaybackRules.canRecover(attempts: 0))
+        #expect(PlaybackRules.canRecover(attempts: 1))
+        #expect(PlaybackRules.canRecover(attempts: 2))
+        #expect(!PlaybackRules.canRecover(attempts: 3))
+        #expect(!PlaybackRules.canRecover(attempts: -1))
+    }
 }
