@@ -209,8 +209,11 @@ final class PlaybackSession: ObservableObject {
         error = nil
         recoveryTask = Task {
             defer { if recoveryGeneration == generation { recoveryTask = nil } }
-            // 第一次优先尝试站源提供的备用线路；若失败再重新解析当前集。
-            if !manual, let oldPlan, oldPlan.hasAlternative {
+            // 只在第一次自动恢复试备用线路。备用仍无法起播时必须重新解析，
+            // 避免反复在同一份已过期凭证的清单内换线直至预算耗尽。
+            if let oldPlan, PlaybackRules.shouldTryFallback(
+                attempt: recoveryAttempts, manual: manual, hasAlternative: oldPlan.hasAlternative
+            ) {
                 traceRecovery("等待 Go 核心提供备用线路")
                 if let next = try? await CoreClient.shared.fallback(plan: oldPlan) {
                     if Task.isCancelled || stopped || recoveryGeneration != generation || currentIndex != index {
