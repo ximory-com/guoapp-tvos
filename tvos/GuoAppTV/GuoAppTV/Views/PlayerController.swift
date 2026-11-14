@@ -348,23 +348,33 @@ final class PlayerController: NSObject, ObservableObject {
     /// 排空挂起的 mpv 事件；只处理播完 / 失败，其余忽略。
     /// wait_event 超时 0 = 立即返回，不阻塞。
     nonisolated func drainEvents(handle: OpaquePointer) {
+        // 事件被排入 MainActor 时，旧句柄可能已被自动恢复的新句柄替换。
+        // 只接受当前句柄事件，防止旧 ERROR / EOF 错误地中断新播放会话。
+        let sender = MpvHandle(raw: handle)
         while true {
             guard let event = mpv_wait_event(handle, 0) else { return }
             let eventId = event.pointee.event_id
             if eventId == MPV_EVENT_NONE || eventId == MPV_EVENT_SHUTDOWN { return }
             if eventId == MPV_EVENT_VIDEO_RECONFIG {
-                Task { @MainActor [weak self] in self?.videoReconfigured() }
+                Task { @MainActor [weak self] in
+                    guard let self, self.mpv == sender.raw else { return }
+                    self.videoReconfigured()
+                }
             }
             if eventId == MPV_EVENT_END_FILE {
                 let endFile = event.pointee.data
                     .assumingMemoryBound(to: mpv_event_end_file.self).pointee
                 if endFile.reason == MPV_END_FILE_REASON_EOF {
-                    Task { @MainActor [weak self] in self?.endedToken += 1 }
+                    Task { @MainActor [weak self] in
+                        guard let self, self.mpv == sender.raw else { return }
+                        self.endedToken += 1
+                    }
                 } else if endFile.reason == MPV_END_FILE_REASON_ERROR {
                     let message = String(cString: mpv_error_string(endFile.error))
                     Task { @MainActor [weak self] in
-                        self?.lastError = message
-                        self?.failedToken += 1
+                        guard let self, self.mpv == sender.raw else { return }
+                        self.lastError = message
+                        self.failedToken += 1
                     }
                 }
                 // STOP / QUIT / REDIRECT：忽略。
