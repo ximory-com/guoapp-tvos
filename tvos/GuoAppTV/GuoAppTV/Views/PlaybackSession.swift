@@ -45,6 +45,18 @@ final class PlaybackSession: ObservableObject {
     private var recoveryTask: Task<Void, Never>?
     private var recoveryGeneration = 0
     private var recoveryAttempts = 0
+    /// 最近三条恢复轨迹持久化到 tvOS UserDefaults，杀掉 App 后依然可查看。
+    @Published private(set) var recoveryStatus: String = UserDefaults.standard.string(forKey: "playbackRecoveryTrace") ?? "未记录恢复事件"
+
+    private func traceRecovery(_ event: String) {
+        let stamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+        var entries = UserDefaults.standard.stringArray(forKey: "playbackRecoveryHistory") ?? []
+        entries.append("\(stamp) \(event)")
+        entries = Array(entries.suffix(8))
+        UserDefaults.standard.set(entries, forKey: "playbackRecoveryHistory")
+        recoveryStatus = entries.suffix(3).joined(separator: "\n")
+        UserDefaults.standard.set(recoveryStatus, forKey: "playbackRecoveryTrace")
+    }
     private var recoveryStableFrom: Double?
     private var stopped = false
 
@@ -138,6 +150,7 @@ final class PlaybackSession: ObservableObject {
     private func recover(position: Double, manual: Bool = false) {
         guard !stopped, recoveryTask == nil, episodes.indices.contains(currentIndex) else { return }
         guard manual || PlaybackRules.canRecover(attempts: recoveryAttempts) else {
+            traceRecovery("自动恢复预算耗尽")
             error = "自动恢复已尝试 \(PlaybackRules.maxRecoveryAttempts) 次仍无播放进度，请手动重试。"
             return
         }
@@ -149,6 +162,7 @@ final class PlaybackSession: ObservableObject {
         let index = currentIndex
         recoveryGeneration += 1
         let generation = recoveryGeneration
+        traceRecovery("开始\(manual ? "手动" : "自动")恢复 #\(recoveryAttempts)，位置 \(Int(resumePosition))s")
         loadTask?.cancel()
         loadTask = nil
         prefetchTask?.cancel()
@@ -163,6 +177,7 @@ final class PlaybackSession: ObservableObject {
             defer { if recoveryGeneration == generation { recoveryTask = nil } }
             // 第一次优先尝试站源提供的备用线路；若失败再重新解析当前集。
             if !manual, let oldPlan, oldPlan.hasAlternative {
+                traceRecovery("等待 Go 核心提供备用线路")
                 if let next = try? await CoreClient.shared.fallback(plan: oldPlan) {
                     if Task.isCancelled || stopped || recoveryGeneration != generation || currentIndex != index {
                         try? await CoreClient.shared.release(session: next.session)
@@ -179,15 +194,18 @@ final class PlaybackSession: ObservableObject {
                         return
                     }
                     activate(next, start: resumePosition)
+                    traceRecovery("备用线路交给播放器，等待起播")
                     return
                 }
             }
+            traceRecovery("开始释放旧媒体会话")
             if let oldPlan { try? await CoreClient.shared.release(session: oldPlan.session) }
             if let oldPrefetch, oldPrefetch.session != oldPlan?.session {
                 try? await CoreClient.shared.release(session: oldPrefetch.session)
             }
             guard !Task.isCancelled, !stopped, recoveryGeneration == generation, currentIndex == index else { return }
             do {
+                traceRecovery("等待 Go 核心重新解析视频")
                 let next = try await CoreClient.shared.resolve(
                     drama: drama, episode: episodes[index], quality: preferredQuality
                 )
@@ -196,8 +214,10 @@ final class PlaybackSession: ObservableObject {
                     return
                 }
                 activate(next, start: resumePosition)
+                traceRecovery("新媒体地址已交给播放器，等待起播")
             } catch {
                 guard !Task.isCancelled, !stopped, recoveryGeneration == generation else { return }
+                traceRecovery("重新解析失败：\(String(describing: type(of: error)))")
                 self.error = "重新解析播放地址失败：\(error.localizedDescription)"
             }
         }
@@ -287,6 +307,7 @@ final class PlaybackSession: ObservableObject {
                 else if position - stableFrom >= 30 {
                     recoveryAttempts = 0
                     recoveryStableFrom = nil
+                    traceRecovery("连续播放 30 秒，恢复预算归零")
                 }
             } else {
                 recoveryStableFrom = position
