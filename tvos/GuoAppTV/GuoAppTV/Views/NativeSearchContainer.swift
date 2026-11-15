@@ -85,9 +85,11 @@ struct NativeSearchContainer<Results: View>: UIViewControllerRepresentable {
 private final class FocusRestoringSearchContainerViewController: UISearchContainerViewController {
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        let field = searchController.searchBar.searchTextField
-        if !field.isFirstResponder {
-            field.becomeFirstResponder()
+        // UISearchBar.searchTextField is iOS-only; use the tvOS responder
+        // that owns the system keyboard instead of accessing private keys.
+        let searchBar = searchController.searchBar
+        if !searchBar.isFirstResponder {
+            _ = searchBar.becomeFirstResponder()
             setNeedsFocusUpdate()
             updateFocusIfNeeded()
         }
