@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import GuoAppLogic
 
@@ -52,5 +53,66 @@ struct PlaybackRulesTests {
         #expect(!PlaybackRules.disablesIdleTimer(hasPlayer: true, paused: true, keepsScreenAwake: true))
         #expect(!PlaybackRules.disablesIdleTimer(hasPlayer: false, paused: false, keepsScreenAwake: true))
         #expect(!PlaybackRules.disablesIdleTimer(hasPlayer: true, paused: false, keepsScreenAwake: false))
+    }
+
+    @Test func stallDetectedAtTwentySecondsIncludingZeroPosition() {
+        var watchdog = PlaybackWatchdog()
+        let start = Date(timeIntervalSince1970: 100)
+        let observed1 = watchdog.observe(position: 0, paused: false, foreground: true, now: start)
+        #expect(!observed1)
+        let observed2 = watchdog.observe(position: 0, paused: false, foreground: true, now: start.addingTimeInterval(19))
+        #expect(!observed2)
+        let observed3 = watchdog.observe(position: 0, paused: false, foreground: true, now: start.addingTimeInterval(20))
+        #expect(observed3)
+        let observed4 = watchdog.observe(position: 0, paused: false, foreground: true, now: start.addingTimeInterval(21))
+        #expect(!observed4)
+    }
+
+    @Test func pausingAndBackgroundingSuspendStallCounter() {
+        var watchdog = PlaybackWatchdog()
+        let start = Date(timeIntervalSince1970: 100)
+        let observed5 = watchdog.observe(position: 12, paused: false, foreground: true, now: start)
+        #expect(!observed5)
+        let observed6 = watchdog.observe(position: 12, paused: true, foreground: true, now: start.addingTimeInterval(22))
+        #expect(!observed6)
+        let observed7 = watchdog.observe(position: 12, paused: false, foreground: true, now: start.addingTimeInterval(23))
+        #expect(!observed7)
+        let observed8 = watchdog.observe(position: 12, paused: false, foreground: false, now: start.addingTimeInterval(47))
+        #expect(!observed8)
+        let observed9 = watchdog.observe(position: 12, paused: false, foreground: true, now: start.addingTimeInterval(48))
+        #expect(!observed9)
+        let observed10 = watchdog.observe(position: 12, paused: false, foreground: true, now: start.addingTimeInterval(68))
+        #expect(observed10)
+    }
+
+    @Test func playbackProgressAndSeekResetTheWatchdog() {
+        var watchdog = PlaybackWatchdog()
+        let t = Date(timeIntervalSince1970: 1_000)
+        let observed11 = watchdog.observe(position: 5, paused: false, foreground: true, now: t)
+        #expect(!observed11)
+        let observed12 = watchdog.observe(position: 10, paused: false, foreground: true, now: t.addingTimeInterval(19))
+        #expect(!observed12)
+        let observed13 = watchdog.observe(position: 3, paused: false, foreground: true, now: t.addingTimeInterval(30))
+        #expect(!observed13)
+        let observed14 = watchdog.observe(position: 3, paused: false, foreground: true, now: t.addingTimeInterval(49))
+        #expect(!observed14)
+        let observed15 = watchdog.observe(position: 3, paused: false, foreground: true, now: t.addingTimeInterval(50))
+        #expect(observed15)
+    }
+
+    @Test func recoveryBudgetIsBounded() {
+        #expect(PlaybackRules.canRecover(attempts: 0))
+        #expect(PlaybackRules.canRecover(attempts: 1))
+        #expect(PlaybackRules.canRecover(attempts: 2))
+        #expect(!PlaybackRules.canRecover(attempts: 3))
+        #expect(!PlaybackRules.canRecover(attempts: -1))
+    }
+
+    @Test func fallbackIsUsedOnlyOnFirstAutomaticRecovery() {
+        #expect(PlaybackRules.shouldTryFallback(attempt: 1, manual: false, hasAlternative: true))
+        #expect(!PlaybackRules.shouldTryFallback(attempt: 2, manual: false, hasAlternative: true))
+        #expect(!PlaybackRules.shouldTryFallback(attempt: 3, manual: false, hasAlternative: true))
+        #expect(!PlaybackRules.shouldTryFallback(attempt: 1, manual: true, hasAlternative: true))
+        #expect(!PlaybackRules.shouldTryFallback(attempt: 1, manual: false, hasAlternative: false))
     }
 }

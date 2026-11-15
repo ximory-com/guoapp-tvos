@@ -1,0 +1,30 @@
+diff --git a/native/core/app_playback_routes.go b/native/core/app_playback_routes.go
+--- a/native/core/app_playback_routes.go
++++ b/native/core/app_playback_routes.go
+@@ -86,11 +86,26 @@
+ 	choice.streamSession = ""
+ 	{
+ 		engine.mu.Lock()
++		// tvOS may suspend a background app without killing its Go runtime.
++		// The engine's stream pointer can remain non-nil after its listener stops.
++		// Probe the listener before handing a new 127.0.0.1 URL to mpv.
++		var retired *nativeStreamServer
++		if engine.stream != nil && !engine.stream.nativeHealthy() {
++			retired = engine.stream
++			engine.stream = nil
++			// All previous playback plans refer to the old dead TCP port.
++			engine.playbacks = nil
++		}
+ 		if engine.stream == nil {
+ 			engine.stream, err = newNativeStreamServer(engine.downloader)
+ 		}
+ 		stream := engine.stream
+ 		engine.mu.Unlock()
++		if retired != nil {
++			retired.nativeLog(nativeStreamDiagnostic{}, "proxy_restart",
++				retired.address, "reason=loopback_unreachable", 0, "")
++			retired.nativeShutdown("proxy_restart")
++		}
+ 		if err != nil {
+ 			return nativePlan{}, err
+ 		}

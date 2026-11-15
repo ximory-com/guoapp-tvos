@@ -80,11 +80,58 @@ final class PlayerController: NSObject, ObservableObject {
     private(set) var lastError = ""
     private var activePlan: PlaybackPlan?
     private var activeDanmakuEnabled = true
+    /// 在重建 Metal 层时保存本次起播位置与倍速（此前会错误地从 0 秒、1x 重来）。
+    private var activeStartPosition = 0.0
+    private var activeSpeed = 1.0
     private var pendingPlay: (plan: PlaybackPlan, start: Double, danmakuEnabled: Bool, speed: Double)?
     private let overlay = DanmakuOverlayView()
     private let danmaku = DanmakuEngine()
     private var overlayAttached = false
     private var progressTimer: Timer?
+    /// 播放无进度时交给会话层重建媒体代理和地址，控制器不直接做网络重试。
+    var onStall: ((Double) -> Void)?
+    private var playbackWatchdog = PlaybackWatchdog()
+    /// 用户主动暂停意图，不能使用 mpv 内部 pause（故障时播放器可能自行暂停）替代。
+    private var userPaused = false
+    private var lastNativeDiagnosticRefresh = Date.distantPast
+    private var recentNativeDiagnostics = ""
+
+    /// Go 核心已经把媒体代理故障写到 Caches/logs/app.log。
+    /// 仅诊断面板需要时读取末尾 64 KiB，不暴露 URL、token 或完整请求路径。
+    static func latestNativeStreamDiagnostics() -> String {
+        let cache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        let url = cache.appendingPathComponent("logs/app.log")
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return "无媒体代理日志" }
+        defer { try? handle.close() }
+        let end = (try? handle.seekToEnd()) ?? 0
+        try? handle.seek(toOffset: end > 65_536 ? end - 65_536 : 0)
+        guard let bytes = try? handle.readToEnd() else { return "读取代理日志失败" }
+        let text = String(decoding: bytes, as: UTF8.self)
+        var entries: [String] = []
+        for line in text.split(separator: "\n").suffix(180) {
+            guard let data = line.data(using: .utf8),
+                let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                let kind = event["event"] as? String, kind.hasPrefix("stream.")
+            else { continue }
+            let timestamp = String((event["time"] as? String ?? "").suffix(14))
+            let status = event["httpStatus"] as? Int ?? 0
+            let host = (event["host"] as? String ?? "").prefix(42)
+            let message = event["message"] as? String ?? ""
+            let category = message.components(separatedBy: "error=").dropFirst().first?
+                .split(separator: " ").first.map(String.init) ?? "-"
+            // Go 只在非主动 release 时记录 session_cancel:
+            // reason=idle_expired / capacity_eviction 等是定位后台失效的关键证据。
+            let reason = message.components(separatedBy: "reason=").dropFirst().first?
+                .split(separator: " ").first.map(String.init) ?? "-"
+            let sessionHash = message.components(separatedBy: "session=").dropFirst().first?
+                .split(separator: " ").first.map(String.init) ?? "-"
+            let code = status == 0 ? "" : " HTTP \(status)"
+            entries.append("\(timestamp) \(kind)\(code) sid=\(sessionHash.prefix(12)) reason=\(reason) error=\(category) host=\(host)")
+        }
+        return entries.suffix(5).joined(separator: "\n").isEmpty
+            ? "无媒体代理异常" : entries.suffix(5).joined(separator: "\n")
+    }
     private var backgroundObservers: [NSObjectProtocol] = []
     private var backgroundObserversInstalled = false
     private var wasPlayingBeforeBackground = false
@@ -111,7 +158,8 @@ final class PlayerController: NSObject, ObservableObject {
         installBackgroundObservers()
         if layerChanged, let activePlan {
             // 视图重建导致 Metal 层换了：mpv 需重建并指向新层，从当前位置续播。
-            startPlayback(plan: activePlan, start: progress.position, danmakuEnabled: activeDanmakuEnabled)
+            let resume = progress.position > 0 ? progress.position : activeStartPosition
+            startPlayback(plan: activePlan, start: resume, danmakuEnabled: activeDanmakuEnabled, speed: activeSpeed)
             return
         }
         if let pending = pendingPlay {
@@ -132,9 +180,11 @@ final class PlayerController: NSObject, ObservableObject {
 
     func stop() {
         stopped = true
+        userPaused = false
         destroyMpv()
         pendingPlay = nil
         activePlan = nil
+        activeStartPosition = 0
         danmaku.reset()
         overlay.clear()
         for observer in backgroundObservers {
@@ -146,7 +196,9 @@ final class PlayerController: NSObject, ObservableObject {
 
     func togglePause() {
         guard mpv != nil else { return }
-        setFlag("pause", !getFlag("pause"))
+        let next = !getFlag("pause")
+        setFlag("pause", next)
+        userPaused = next
         isPaused = getFlag("pause")
         updateIdleTimer()
     }
@@ -161,6 +213,7 @@ final class PlayerController: NSObject, ObservableObject {
     }
 
     private func setPaused(_ paused: Bool) {
+        userPaused = paused
         guard mpv != nil else { return }
         setFlag("pause", paused)
         isPaused = getFlag("pause")
@@ -183,8 +236,10 @@ final class PlayerController: NSObject, ObservableObject {
     /// 手动选集时先停掉当前句柄：旧集不再上报进度（否则会记到新集名下），
     /// 新集地址解析好后照常 play()。不动后台观察者与弹幕浮层。
     func halt() {
+        userPaused = false
         destroyMpv()
         activePlan = nil
+        activeStartPosition = 0
         pendingPlay = nil
         progress = PlaybackProgress(position: 0, duration: 0)
         isPaused = false
@@ -225,6 +280,7 @@ final class PlayerController: NSObject, ObservableObject {
 
     private func startPlayback(plan: PlaybackPlan, start: Double, danmakuEnabled: Bool, speed: Double = 1.0) {
         destroyMpv()
+        playbackWatchdog.reset()
         danmaku.configure(plan: plan, enabled: danmakuEnabled)
         guard let url = URL(string: plan.url) else {
             debugInfo = "播放地址无效"
@@ -241,6 +297,9 @@ final class PlayerController: NSObject, ObservableObject {
         lastError = ""
         activePlan = plan
         activeDanmakuEnabled = danmakuEnabled
+        activeStartPosition = start
+        activeSpeed = speed
+        userPaused = startsPaused
         progress = PlaybackProgress(position: 0, duration: 0)
         videoSize = nil
         debugInfo = "正在加载…"
@@ -320,6 +379,7 @@ final class PlayerController: NSObject, ObservableObject {
     }
 
     private func destroyMpv() {
+        playbackWatchdog.reset()
         progressTimer?.invalidate()
         progressTimer = nil
         // 播放器销毁时恢复系统空闲计时器，屏保才能正常出现。
@@ -343,23 +403,33 @@ final class PlayerController: NSObject, ObservableObject {
     /// 排空挂起的 mpv 事件；只处理播完 / 失败，其余忽略。
     /// wait_event 超时 0 = 立即返回，不阻塞。
     nonisolated func drainEvents(handle: OpaquePointer) {
+        // 事件被排入 MainActor 时，旧句柄可能已被自动恢复的新句柄替换。
+        // 只接受当前句柄事件，防止旧 ERROR / EOF 错误地中断新播放会话。
+        let sender = MpvHandle(raw: handle)
         while true {
             guard let event = mpv_wait_event(handle, 0) else { return }
             let eventId = event.pointee.event_id
             if eventId == MPV_EVENT_NONE || eventId == MPV_EVENT_SHUTDOWN { return }
             if eventId == MPV_EVENT_VIDEO_RECONFIG {
-                Task { @MainActor [weak self] in self?.videoReconfigured() }
+                Task { @MainActor [weak self] in
+                    guard let self, self.mpv == sender.raw else { return }
+                    self.videoReconfigured()
+                }
             }
             if eventId == MPV_EVENT_END_FILE {
                 let endFile = event.pointee.data
                     .assumingMemoryBound(to: mpv_event_end_file.self).pointee
                 if endFile.reason == MPV_END_FILE_REASON_EOF {
-                    Task { @MainActor [weak self] in self?.endedToken += 1 }
+                    Task { @MainActor [weak self] in
+                        guard let self, self.mpv == sender.raw else { return }
+                        self.endedToken += 1
+                    }
                 } else if endFile.reason == MPV_END_FILE_REASON_ERROR {
                     let message = String(cString: mpv_error_string(endFile.error))
                     Task { @MainActor [weak self] in
-                        self?.lastError = message
-                        self?.failedToken += 1
+                        guard let self, self.mpv == sender.raw else { return }
+                        self.lastError = message
+                        self.failedToken += 1
                     }
                 }
                 // STOP / QUIT / REDIRECT：忽略。
@@ -388,6 +458,7 @@ final class PlayerController: NSObject, ObservableObject {
             let size = CGSize(width: Double(width), height: Double(height))
             if size != videoSize { videoSize = size }
         }
+        if position.isFinite && position > 0 { activeStartPosition = position }
         progress = PlaybackProgress(
             position: position.isFinite ? position : 0,
             duration: duration.isFinite ? duration : 0
@@ -397,6 +468,17 @@ final class PlayerController: NSObject, ObservableObject {
             durationMs: (duration.isFinite && duration > 0) ? Int(duration * 1000) : 0
         )
         updateDebugInfo(position: position, duration: duration)
+        // 仅在前台且未主动暂停时观察；0/0 一直不动也能自恢复。
+        // 在回调前更新计时戳，避免异步重载阶段反复触发。
+        if playbackWatchdog.observe(
+            position: position,
+            paused: userPaused || startsPaused,
+            foreground: UIApplication.shared.applicationState == .active,
+            now: Date()
+        ) {
+            lastError = "playback stalled: no progress for 20s"
+            onStall?(max(0, position))
+        }
     }
 
     /// 每秒刷新诊断面板：状态、编码、硬解、解密、播放地址。
@@ -409,13 +491,19 @@ final class PlayerController: NSObject, ObservableObject {
         let paused = getFlag("pause")
         let buffering = getFlag("paused-for-cache")
         let state = paused ? "已暂停" : (buffering ? "缓冲中" : "播放中")
-        lines.append("状态: \(state)")
+        lines.append("状态: \(state)；用户暂停=\(userPaused)，引擎暂停=\(paused)，缓冲=\(buffering)")
+        if Date().timeIntervalSince(lastNativeDiagnosticRefresh) >= 5 {
+            lastNativeDiagnosticRefresh = Date()
+            recentNativeDiagnostics = Self.latestNativeStreamDiagnostics()
+        }
+        lines.append("媒体代理: \(recentNativeDiagnostics)")
         lines.append("视频: \(getString("video-codec").orDash) 硬解: \(getString("hwdec-current").orDash)")
         lines.append("音频: \(getString("audio-codec").orDash)")
         lines.append("进度: \(Int(position)) / \(Int(duration)) 秒")
         lines.append("解密: \(hasDecryptionKey ? "有" : "无")")
         if let url = currentURL {
-            lines.append("地址: \(url.host ?? "-")\(url.path)")
+            // 不把本地代理会话 token 或上游签名路径显示在电视/截图里。
+            lines.append("地址: \(url.host ?? "-")，格式=\(url.pathExtension)")
         }
         if !lastError.isEmpty {
             lines.append("错误: \(lastError)")
@@ -443,6 +531,8 @@ final class PlayerController: NSObject, ObservableObject {
 
     /// 切后台时暂停并停掉视频输出；切回前台时恢复输出并续播（防回前台黑屏）。
     private func enterBackground() {
+        // tvOS 后台可能冻结计时器，不能把后台耗时算作播放停滞。
+        playbackWatchdog.reset()
         guard let handle = mpv else { return }
         wasPlayingBeforeBackground = !getFlag("pause")
         setFlag("pause", true)
@@ -451,6 +541,7 @@ final class PlayerController: NSObject, ObservableObject {
     }
 
     private func enterForeground() {
+        playbackWatchdog.reset()
         guard let handle = mpv else { return }
         _ = mpv_set_option_string(handle, "vid", "auto")
         if wasPlayingBeforeBackground {

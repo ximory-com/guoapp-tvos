@@ -228,7 +228,7 @@ private struct PlayerScreen: View {
                     .transition(.opacity)
                 }
                 if diagnosticsEnabled && !controller.debugInfo.isEmpty {
-                    Text(controller.debugInfo)
+                    Text(controller.debugInfo + "\n恢复轨迹: \n" + session.recoveryStatus)
                         .font(.system(size: TVTheme.TextSize.caption2))
                         .foregroundColor(.white)
                         .multilineTextAlignment(.leading)
@@ -257,12 +257,41 @@ private struct PlayerScreen: View {
                             dismiss()
                         }
                     }
+                    // 本版是诊断构建：失败时无条件显示错误轨迹，不能依赖用户此前是否开启诊断。
+                    // 旧版在后台恢复后会直接跳错误页，导致隐含设置的调试面板永远不可见。
+                    Group {
+                        Text("恢复轨迹（重启后仍保留）:\n" + session.recoveryStatus
+                             + "\nGo 媒体代理日志:\n" + PlayerController.latestNativeStreamDiagnostics()
+                             + "\n播放器: " + controller.lastError)
+                            .font(.system(size: TVTheme.TextSize.caption2))
+                            .foregroundColor(.white)
+                            .multilineTextAlignment(.leading)
+                            .lineLimit(23)
+                            .frame(maxWidth: 1280, alignment: .leading)
+                            .padding(16)
+                            .background(Color.black.opacity(0.8))
+                            .cornerRadius(10)
+                    }
                 }
                 .padding(60)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(TVTheme.background.ignoresSafeArea())
             } else if session.plan == nil {
                 TVLoadingView("正在解析播放地址…")
+            }
+            // 解析阶段旧播放器已被销毁，仍要保留最后几个阶段记录，
+            // 否则诊断浮层会随 plan=nil 一起消失，无法判断是否卡在 Go 请求。
+            if diagnosticsEnabled && session.plan == nil && session.error == nil {
+                Text("恢复轨迹（重启后仍保留）:\n" + session.recoveryStatus + "\nGo媒体日志:\n" + PlayerController.latestNativeStreamDiagnostics())
+                    .font(.system(size: TVTheme.TextSize.caption2))
+                    .foregroundColor(.white)
+                    .multilineTextAlignment(.leading)
+                    .padding(16)
+                    .background(Color.black.opacity(0.65))
+                    .cornerRadius(10)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .padding(48)
+                    .allowsHitTesting(false)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
