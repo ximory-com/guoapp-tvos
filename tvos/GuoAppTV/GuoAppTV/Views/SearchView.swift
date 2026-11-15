@@ -58,6 +58,10 @@ private struct SearchResultsView: View {
             .padding(.top, 24)
             .padding(.bottom, 56)
         }
+        // Treat the results grid as a focus destination when moving down
+        // from the native tvOS keyboard. Do not force focus onto a poster
+        // while the user is still entering text.
+        .focusSection()
     }
 
     @ViewBuilder
