@@ -1,27 +1,28 @@
 import SwiftUI
 
-/// 搜索页：tvOS 原生搜索界面（键盘在上、结果在下，与 Apple TV App 的搜索一致），边输入边出结果。
-/// 搜索框由 NativeSearchContainer（UIKit）提供，避免 SwiftUI 回写文字打断 iPhone 的中文输入；
-/// 搜索逻辑在 SearchModel（核心 catalog 的关键词搜索 + 系列归组，与原版一致）。
-/// 切到本页时焦点留在标签栏，向下才进入键盘。
+/// 搜索页使用系统 SwiftUI .searchable：由 tvOS 自己管理键盘、焦点与结果区。
+/// 不再混合 UIKit UISearchContainerViewController 与 SwiftUI NavigationStack。
+/// 输入文本为单向同步：model 只接收输入，不反向重写键盘中的组字。
 struct SearchView: View {
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var store: Store
     @StateObject private var model = SearchModel()
     @StateObject private var launcher = PlaybackLauncher()
     @State private var path: [Drama] = []
+    @State private var searchText = ""
 
     var body: some View {
         NavigationStack(path: $path) {
-            NativeSearchContainer(model: model, suggestions: model.suggestions, prompt: "输入剧名、演员或关键词") {
-                // 结果放在搜索控制器自己的 UIHostingController 里：环境要显式传，导航用回调推到外层的 NavigationStack。
-                SearchResultsView(model: model, launcher: launcher) { drama in
-                    path.append(drama)
-                }
-                .environmentObject(appState)
-                .environmentObject(store)
+            SearchResultsView(model: model, launcher: launcher) { drama in
+                path.append(drama)
             }
-            .ignoresSafeArea()
+            .environmentObject(store)
+            .searchable(text: $searchText, prompt: "输入剧名、演员或关键词")
+            .searchSuggestions {
+                ForEach(model.suggestions.prefix(8), id: \.self) { suggestion in
+                    Text(suggestion).searchCompletion(suggestion)
+                }
+            }
             .navigationDestination(for: Drama.self) { drama in
                 DetailView(drama: drama)
             }
@@ -33,6 +34,11 @@ struct SearchView: View {
         .onAppear {
             model.source = appState.selectedSource
             model.loadPopular()
+        }
+        .onChange(of: searchText) { text in
+            // 不从 SearchModel 回写到 searchText。保持 iPhone 远程输入
+            // 的编辑状态、组字候选和系统键盘焦点完全归系统管理。
+            model.update(text: text)
         }
         .onChange(of: appState.selectedSource) { source in
             model.source = source
