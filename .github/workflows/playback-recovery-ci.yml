@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - fix/playback-stall-recovery
+      - fix/tvos-search-keyboard-focus
   workflow_dispatch:
 
 permissions:
