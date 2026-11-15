@@ -1,9 +1,10 @@
-name: Playback Recovery Test Build
+name: Fork tvOS Validation Build
 
-# Private validation workflow for the fork; NEVER publishes GitHub Releases.
+# Fork-only validation workflow for main and repair branches; NEVER publishes GitHub Releases.
 on:
   push:
     branches:
+      - main
       - fix/playback-stall-recovery
       - fix/tvos-search-keyboard-focus
   workflow_dispatch:
