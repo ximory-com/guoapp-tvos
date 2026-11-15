@@ -29,13 +29,17 @@ struct NativeSearchContainer<Results: View>: UIViewControllerRepresentable {
         searchController.searchBar.autocapitalizationType = .none
         context.coordinator.searchController = searchController
         context.coordinator.resultsController = resultsController
-        let container = UISearchContainerViewController(searchController: searchController)
+        let container = FocusRestoringSearchContainerViewController(searchController: searchController)
         container.view.backgroundColor = UIColor(TVTheme.background)
         return container
     }
 
     func updateUIViewController(_ container: UISearchContainerViewController, context: Context) {
-        context.coordinator.resultsController?.rootView = results()
+        // SearchResultsView owns its @ObservedObject model and receives updates itself.
+        // Replacing UIHostingController.rootView here on *every* SearchView refresh
+        // recreates SwiftUI's tvOS focus tree underneath the system keyboard.
+        // On tvOS 26 this can strand remote focus on the initial "a" key.
+        // Keep the hosting hierarchy stable for the entire lifetime of this tab.
         context.coordinator.apply(suggestions: suggestions)
     }
 
@@ -71,3 +75,22 @@ struct NativeSearchContainer<Results: View>: UIViewControllerRepresentable {
         }
     }
 }
+
+#if os(tvOS)
+/// UISearchContainerViewController handles the native system keyboard. A tab
+/// kept alive across navigation/app suspension can return without a valid
+/// first responder, leaving a visible but unresponsive keyboard. Only restore
+/// text input focus when the container becomes visible and is not editing.
+@MainActor
+private final class FocusRestoringSearchContainerViewController: UISearchContainerViewController {
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        let field = searchController.searchBar.searchTextField
+        if !field.isFirstResponder {
+            field.becomeFirstResponder()
+            setNeedsFocusUpdate()
+            updateFocusIfNeeded()
+        }
+    }
+}
+#endif
