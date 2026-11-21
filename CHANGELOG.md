@@ -26,6 +26,10 @@
 - 修复播放一会后 tvOS 屏保自动弹出：mpv 不是 AVPlayer，系统不知道在播视频；
   播放时禁止系统空闲计时器，暂停 / 停止 / 切后台时恢复。
 
+## 2.50.10
+
+- 同步上游核心到 Xanerix/guoapp `0bd98a3`（fix: Android「硬解（修正偏蓝）」黑屏无法播放，改用着色器交换色度（#144））。本次仅更新 Go 核心（submodule 指针），tvOS 应用代码无改动。
+
 ## 2.50.9
 
 - 同步上游核心到 Xanerix/guoapp `51f39b5`（chore: 新增问题反馈与功能建议的 issue 模板，站源问题引导到 guoapp-modules）。本次仅更新 Go 核心（submodule 指针），tvOS 应用代码无改动。
