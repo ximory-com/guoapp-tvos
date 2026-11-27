@@ -26,6 +26,10 @@
 - 修复播放一会后 tvOS 屏保自动弹出：mpv 不是 AVPlayer，系统不知道在播视频；
   播放时禁止系统空闲计时器，暂停 / 停止 / 切后台时恢复。
 
+## 2.50.13
+
+- 同步上游核心到 Xanerix/guoapp `8493adf`（feat(linux): 新增 Linux x86_64 官方支持与 AppImage 构建发布（#271））。本次仅更新 Go 核心（submodule 指针），tvOS 应用代码无改动。
+
 ## 2.50.12
 
 - 同步上游核心到 Xanerix/guoapp `41b8206`（chore: 红果站源收回为私有仓库，撤出在线仓库，CI 改回用只读部署密钥检出）。本次仅更新 Go 核心（submodule 指针），tvOS 应用代码无改动。
